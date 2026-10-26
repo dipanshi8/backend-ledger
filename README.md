@@ -1,4 +1,4 @@
-# Backend Ledger – Financial Transaction API
+# Backend Ledger – Financial Transaction Engine
 
 A backend ledger system built to explore transaction integrity, authentication, idempotency and auditability. It models accounts, fund transfers and double-entry style book keeping.
 
