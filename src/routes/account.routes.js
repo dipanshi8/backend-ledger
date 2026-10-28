@@ -29,5 +29,12 @@ router.get("/", authMiddleware.authMiddleware, accountController.getUserAccounts
 router.get("/balance/:accountId", authMiddleware.authMiddleware, accountController.getAccountBalanceController)
 
 
+/**
+ * - GET /api/accounts/:accountId/ledger
+ * - Ledger history for an account owned by the logged-in user
+ */
+router.get("/:accountId/ledger", authMiddleware.authMiddleware, accountController.getAccountLedgerController)
+
+
 
 module.exports = router

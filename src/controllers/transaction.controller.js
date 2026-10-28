@@ -1,6 +1,6 @@
 const transactionModel = require("../models/transaction.model")
 const ledgerModel = require("../models/ledger.model")
-const accountModel = require("../models/account.model")
+const accountAccess = require("../services/account-access.service")
 const emailService = require("../services/email.service")
 const mongoose = require("mongoose")
 
@@ -32,13 +32,11 @@ async function createTransaction(req, res) {
         })
     }
 
-    const fromUserAccount = await accountModel.findOne({
-        _id: fromAccount,
-    })
-
-    const toUserAccount = await accountModel.findOne({
-        _id: toAccount,
-    })
+    // Sender must be an account owned by the authenticated user.
+    // Do not look up fromAccount without the owner filter — that would
+    // distinguish "missing" from "someone else's account".
+    const fromUserAccount = await accountAccess.findOwnedAccount(fromAccount, req.user._id)
+    const toUserAccount = await accountAccess.findAccountById(toAccount)
 
     if (!fromUserAccount || !toUserAccount) {
         return res.status(400).json({
@@ -55,6 +53,17 @@ async function createTransaction(req, res) {
     })
 
     if (isTransactionAlreadyExists) {
+        const canAccessExisting = await accountAccess.userIsPartyToTransaction(
+            req.user._id,
+            isTransactionAlreadyExists
+        )
+
+        if (!canAccessExisting) {
+            return res.status(400).json({
+                message: "Invalid idempotency key"
+            })
+        }
+
         if (isTransactionAlreadyExists.status === "COMPLETED") {
             return res.status(200).json({
                 message: "Transaction already processed",
@@ -176,9 +185,7 @@ async function createInitialFundsTransaction(req, res) {
         })
     }
 
-    const toUserAccount = await accountModel.findOne({
-        _id: toAccount,
-    })
+    const toUserAccount = await accountAccess.findAccountById(toAccount)
 
     if (!toUserAccount) {
         return res.status(400).json({
@@ -186,9 +193,8 @@ async function createInitialFundsTransaction(req, res) {
         })
     }
 
-    const fromUserAccount = await accountModel.findOne({
-        user: req.user._id
-    })
+    // Source of funds is the authenticated system user's own account, never a body field.
+    const fromUserAccount = await accountAccess.findFirstOwnedAccount(req.user._id)
 
     if (!fromUserAccount) {
         return res.status(400).json({
@@ -236,7 +242,24 @@ async function createInitialFundsTransaction(req, res) {
 
 }
 
+async function getTransactionController(req, res) {
+    const { transactionId } = req.params
+
+    const transaction = await accountAccess.findVisibleTransaction(transactionId, req.user._id)
+
+    if (!transaction) {
+        return res.status(404).json({
+            message: "Transaction not found"
+        })
+    }
+
+    res.status(200).json({
+        transaction
+    })
+}
+
 module.exports = {
     createTransaction,
-    createInitialFundsTransaction
+    createInitialFundsTransaction,
+    getTransactionController
 }

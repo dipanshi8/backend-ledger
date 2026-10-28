@@ -19,4 +19,11 @@ transactionRoutes.post("/", authMiddleware.authMiddleware, transactionController
 
 transactionRoutes.post("/system/initial-funds", authMiddleware.authSystemUserMiddleware, transactionController.createInitialFundsTransaction)
 
+
+/**
+ * - GET /api/transactions/:transactionId
+ * - Transaction details if the caller owns the sender or receiver account
+ */
+transactionRoutes.get("/:transactionId", authMiddleware.authMiddleware, transactionController.getTransactionController)
+
 module.exports = transactionRoutes;
