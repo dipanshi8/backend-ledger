@@ -1,29 +1,41 @@
-const { Router } = require('express');
-const authMiddleware = require('../middleware/auth.middleware');
+const { Router } = require('express')
+const authMiddleware = require('../middleware/auth.middleware')
 const transactionController = require("../controllers/transaction.controller")
+const { financialWriteRateLimiter } = require("../middleware/rate-limit.middleware")
 
-const transactionRoutes = Router();
-
-/**
- * - POST /api/transactions/
- * - Create a new transaction
- */
-
-transactionRoutes.post("/", authMiddleware.authMiddleware, transactionController.createTransaction)
-
+const transactionRoutes = Router()
 
 /**
- * - POST /api/transactions/system/initial-funds
- * - Create initial funds transaction from system user
+ * POST /api/transactions/
+ * Rate-limited financial write — limiter applied here on the route so it
+ * cannot be bypassed by middleware-ordering changes in app.js.
  */
-
-transactionRoutes.post("/system/initial-funds", authMiddleware.authSystemUserMiddleware, transactionController.createInitialFundsTransaction)
-
+transactionRoutes.post(
+    "/",
+    financialWriteRateLimiter,
+    authMiddleware.authMiddleware,
+    transactionController.createTransaction
+)
 
 /**
- * - GET /api/transactions/:transactionId
- * - Transaction details if the caller owns the sender or receiver account
+ * POST /api/transactions/system/initial-funds
+ * System-initiated funding — same write rate limit applies.
  */
-transactionRoutes.get("/:transactionId", authMiddleware.authMiddleware, transactionController.getTransactionController)
+transactionRoutes.post(
+    "/system/initial-funds",
+    financialWriteRateLimiter,
+    authMiddleware.authSystemUserMiddleware,
+    transactionController.createInitialFundsTransaction
+)
 
-module.exports = transactionRoutes;
+/**
+ * GET /api/transactions/:transactionId
+ * Read-only — no write rate limiter needed.
+ */
+transactionRoutes.get(
+    "/:transactionId",
+    authMiddleware.authMiddleware,
+    transactionController.getTransactionController
+)
+
+module.exports = transactionRoutes

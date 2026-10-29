@@ -8,6 +8,13 @@ function errorHandler(err, req, res, next) {
         return next(err);
     }
 
+    // Oversized request body (express body-parser sets status 413)
+    if (err.status === 413 || err.type === 'entity.too.large') {
+        return res.status(413).json({
+            message: "Request body too large"
+        });
+    }
+
     // Malformed JSON request body
     if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
         return res.status(400).json({
