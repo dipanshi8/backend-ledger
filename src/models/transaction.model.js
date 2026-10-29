@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { paiseToRupees } = require('../utils/money');
 
 const tranactionSchema = new mongoose.Schema({
 
@@ -16,6 +17,13 @@ const tranactionSchema = new mongoose.Schema({
         index: true
     },
 
+    currency: {
+        type: String,
+        enum: ['INR'],
+        default: 'INR',
+        required: [true, 'Currency is required']
+    },
+
     status: {
         type: String,
         enum:{
@@ -28,7 +36,11 @@ const tranactionSchema = new mongoose.Schema({
     amount: {
         type: Number,
         required: [true, 'Transaction amount is required'],
-        min: [0, 'Transaction amount must be a positive number']
+        min: [1, 'Transaction amount must be at least 1 minor unit (paise)'],
+        validate: {
+            validator: Number.isInteger,
+            message: 'Transaction amount must be an integer in minor units (paise)'
+        }
     },
 
     idempotencyKey: {
@@ -38,8 +50,23 @@ const tranactionSchema = new mongoose.Schema({
         unique: true
     }
 }, {
-        timestamps: true
-
+    timestamps: true,
+    toJSON: {
+        transform: (doc, ret) => {
+            if (typeof ret.amount === 'number') {
+                ret.amount = paiseToRupees(ret.amount);
+            }
+            return ret;
+        }
+    },
+    toObject: {
+        transform: (doc, ret) => {
+            if (typeof ret.amount === 'number') {
+                ret.amount = paiseToRupees(ret.amount);
+            }
+            return ret;
+        }
+    }
 });
 
 const transactionModel = mongoose.model('transaction', tranactionSchema);

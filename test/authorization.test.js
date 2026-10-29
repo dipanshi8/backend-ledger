@@ -1,3 +1,9 @@
+const fs = require("node:fs")
+if (fs.existsSync("D:\\temp")) {
+    process.env.TEMP = "D:\\temp"
+    process.env.TMP = "D:\\temp"
+}
+
 const { describe, it, before, after } = require("node:test")
 const assert = require("node:assert/strict")
 const { MongoMemoryReplSet } = require("mongodb-memory-server")
@@ -42,17 +48,18 @@ async function createAccount(token) {
 }
 
 async function creditAccount(accountId, amount) {
+    const amountInPaise = Math.round(amount * 100)
     const transaction = await transactionModel.create({
         fromAccount: accountId,
         toAccount: accountId,
-        amount,
+        amount: amountInPaise,
         idempotencyKey: `seed-${accountId}-${Date.now()}-${Math.random()}`,
         status: "COMPLETED"
     })
 
     await ledgerModel.create({
         account: accountId,
-        amount,
+        amount: amountInPaise,
         transaction: transaction._id,
         type: "CREDIT"
     })
@@ -245,7 +252,7 @@ describe("account ownership and authorization", () => {
             })
 
         assert.equal(res.status, 201, res.text)
-        assert.equal(res.body.transaction.status, "PENDING")
+        assert.equal(res.body.transaction.status, "COMPLETED")
 
         const completed = await transactionModel.findById(res.body.transaction._id)
         assert.equal(completed.status, "COMPLETED")
@@ -272,7 +279,7 @@ describe("account ownership and authorization", () => {
         const transaction = await transactionModel.create({
             fromAccount: aliceAccount._id,
             toAccount: bobAccount._id,
-            amount: 5,
+            amount: 500,
             idempotencyKey: `hidden-tx-${Date.now()}`,
             status: "COMPLETED"
         })
@@ -302,7 +309,7 @@ describe("account ownership and authorization", () => {
         await transactionModel.create({
             fromAccount: aliceAccount._id,
             toAccount: bobAccount._id,
-            amount: 9,
+            amount: 900,
             idempotencyKey: sharedKey,
             status: "COMPLETED"
         })

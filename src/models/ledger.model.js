@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { paiseToRupees } = require('../utils/money');
 
 const ledgerSchema = new mongoose.Schema({
 
@@ -13,6 +14,11 @@ const ledgerSchema = new mongoose.Schema({
     amount: {
         type: Number,
         required: [true, 'Ledger amount is required'],
+        min: [1, 'Ledger amount must be at least 1 minor unit (paise)'],
+        validate: {
+            validator: Number.isInteger,
+            message: 'Ledger amount must be an integer in minor units (paise)'
+        },
         immutable: true
     },  
 
@@ -34,7 +40,23 @@ const ledgerSchema = new mongoose.Schema({
         immutable: true
     }
 }, {
-    timestamps: true
+    timestamps: true,
+    toJSON: {
+        transform: (doc, ret) => {
+            if (typeof ret.amount === 'number') {
+                ret.amount = paiseToRupees(ret.amount);
+            }
+            return ret;
+        }
+    },
+    toObject: {
+        transform: (doc, ret) => {
+            if (typeof ret.amount === 'number') {
+                ret.amount = paiseToRupees(ret.amount);
+            }
+            return ret;
+        }
+    }
 });
 
 function preventLedgerModification() {
