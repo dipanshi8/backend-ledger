@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node --test --test-timeout=180000 test/authorization.test.js test/financial-integrity.test.js test/security-sanitization.test.js test/api-security.test.js",
+    "test": "node --test --test-timeout=180000 test/authorization.test.js test/financial-integrity.test.js test/security-sanitization.test.js test/api-security.test.js test/operational.test.js",
     "start": "node server.js",
     "dev": "npx nodemon server.js"
   },

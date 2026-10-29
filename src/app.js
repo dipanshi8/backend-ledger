@@ -1,15 +1,16 @@
 /**
- * Express application — Stage 3B: API Security & Protection
+ * Express application — Stage 3B/3C
  *
  * Middleware order (must not be changed without understanding dependencies):
  *   1. helmet          — security headers on every response
  *   2. cors            — CORS preflight + credentialed-origin enforcement
- *   3. express.json    — body parsing with explicit size cap
- *   4. cookieParser    — cookie access for auth middleware
- *   5. rate limiters   — mounted on individual routers (see routes)
- *   6. routes
- *   7. 404 fallback
- *   8. centralized error handler
+ *   3. requestLogger   — structured HTTP access log (redacts sensitive headers)
+ *   4. express.json    — body parsing with explicit size cap
+ *   5. cookieParser    — cookie access for auth middleware
+ *   6. rate limiters   — mounted on individual routers (see routes)
+ *   7. routes          — API routes
+ *   8. 404 fallback
+ *   9. centralized error handler
  *
  * ─────────────────────────────────────────────────────────────────────────────
  * CORS CONFIGURATION
@@ -36,19 +37,28 @@
  * In-memory counters — NOT shared across multiple application instances.
  * See src/middleware/rate-limit.middleware.js for limits and notes on
  * upgrading to a shared store for multi-instance deployments.
+ *
+ * ─────────────────────────────────────────────────────────────────────────────
+ * HEALTH ENDPOINTS
+ * ─────────────────────────────────────────────────────────────────────────────
+ * GET /health/live   — liveness: returns 200 if the process is running
+ * GET /health/ready  — readiness: returns 200 only when MongoDB is connected;
+ *                      returns 503 during startup or after a disconnect
  */
 
-const express = require('express')
-const helmet = require('helmet')
-const cors = require('cors')
-const cookieParser = require('cookie-parser')
-const { errorHandler } = require('./middleware/error.middleware')
+const express = require("express")
+const helmet = require("helmet")
+const cors = require("cors")
+const cookieParser = require("cookie-parser")
+const { errorHandler } = require("./middleware/error.middleware")
+const { requestLogger } = require("./config/logger")
+const { readinessState } = require("./config/db")
 
 // ── CORS origin list ──────────────────────────────────────────────────────────
 /**
  * Parse ALLOWED_ORIGINS env var into a validated list.
  * Each entry must look like a full origin (scheme://host[:port]).
- * Entries that do not match the pattern are silently dropped and warned.
+ * Entries that do not match the pattern are dropped with a warning.
  */
 function parseAllowedOrigins() {
     const raw = process.env.ALLOWED_ORIGINS || ""
@@ -61,7 +71,6 @@ function parseAllowedOrigins() {
             if (!o) return false
             try {
                 const url = new URL(o)
-                // Must have an explicit scheme and host; no path/query/fragment.
                 const isValid =
                     (url.protocol === "http:" || url.protocol === "https:") &&
                     url.hostname.length > 0 &&
@@ -77,39 +86,25 @@ function parseAllowedOrigins() {
                 return false
             }
         })
-        .map(o => {
-            // Normalize: strip trailing slash that new URL() added.
-            return o.replace(/\/$/, "")
-        })
+        .map(o => o.replace(/\/$/, ""))
 }
 
 const allowedOrigins = parseAllowedOrigins()
 
 const corsOptions = {
-    /**
-     * Dynamic origin check — avoids the insecure wildcard+credentials combo.
-     * In test mode with no configured origins we allow everything so that
-     * supertest requests (which have no Origin header) pass through cleanly.
-     */
     origin(requestOrigin, callback) {
-        // Requests with no Origin header (same-origin browser requests, curl,
-        // supertest, server-to-server) are always allowed.
         if (!requestOrigin) {
             return callback(null, true)
         }
-
-        // Test environment with no configured origins: allow all.
         if (process.env.NODE_ENV === "test" && allowedOrigins.length === 0) {
             return callback(null, true)
         }
-
         if (allowedOrigins.includes(requestOrigin)) {
             return callback(null, requestOrigin)
         }
-
         return callback(new Error(`CORS: origin not allowed: ${requestOrigin}`))
     },
-    credentials: true,   // Required for cookie-based auth flows
+    credentials: true,
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     optionsSuccessStatus: 204
@@ -121,28 +116,54 @@ const app = express()
 // 1. Security headers
 app.use(helmet())
 
-// 2. CORS (must be before any route handler so preflight OPTIONS are handled)
+// 2. CORS (before route handlers so preflight OPTIONS is handled correctly)
 app.use(cors(corsOptions))
 
-// 3. Body parsing — 100 kB cap; oversized bodies return a controlled 413 via
-//    the centralized error handler.
+// 3. Structured HTTP access log (redacts Authorization and Cookie headers)
+app.use(requestLogger())
+
+// 4. Body parsing — 100 kB cap; oversized bodies return a controlled 413
 app.use(express.json({ limit: "100kb" }))
 
-// 4. Cookie parsing
+// 5. Cookie parsing
 app.use(cookieParser())
 
-// ── Routes ────────────────────────────────────────────────────────────────────
-const authRouter = require('./routes/auth.routes')
-const accountRouter = require('./routes/account.routes')
-const transactionRoutes = require('./routes/transaction.routes')
+// ── Health endpoints (unauthenticated, no rate limiting) ─────────────────────
+/**
+ * GET /health/live
+ * Liveness probe — returns 200 as long as the Node.js process is alive.
+ * Does not check external dependencies.
+ */
+app.get("/health/live", (req, res) => {
+    res.status(200).json({ status: "ok" })
+})
 
+/**
+ * GET /health/ready
+ * Readiness probe — returns 200 only when the application can serve requests
+ * (MongoDB is connected). Returns 503 during startup or after a disconnect.
+ * Does not expose connection strings, credentials, or internal error details.
+ */
+app.get("/health/ready", (req, res) => {
+    if (readinessState.dbReady) {
+        return res.status(200).json({ status: "ready" })
+    }
+    return res.status(503).json({ status: "unavailable", reason: "database not connected" })
+})
+
+// ── Legacy root liveness (kept for backwards compatibility) ───────────────────
 app.get("/", (req, res) => {
     res.send("Ledger Service is up and running")
 })
 
+// ── API routes ────────────────────────────────────────────────────────────────
+const authRouter = require("./routes/auth.routes")
+const accountRouter = require("./routes/account.routes")
+const transactionRoutes = require("./routes/transaction.routes")
+
 app.use("/api/auth", authRouter)
 app.use("/api/accounts", accountRouter)
-app.use('/api/transactions', transactionRoutes)
+app.use("/api/transactions", transactionRoutes)
 
 // Fallback for unmatched routes
 app.use((req, res) => {
