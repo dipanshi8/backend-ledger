@@ -3,15 +3,86 @@ const jwt = require("jsonwebtoken")
 const emailService = require("../services/email.service")
 const tokenBlackListModel = require("../models/blackList.model")
 
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const COOKIE_OPTIONS = {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    maxAge: 3 * 24 * 60 * 60 * 1000 // 3 days
+}
+
 /**
-* - user register controller
-* - POST /api/auth/register
-*/
+ * Validates registration input fields.
+ * Rejects missing fields, non-strings, NoSQL query objects, and out-of-bound lengths.
+ * @param {any} body
+ * @returns {{ isValid: boolean, error?: string, normalizedEmail?: string, name?: string }}
+ */
+function validateRegistrationInput(body) {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return { isValid: false, error: "Request body must be a JSON object" }
+    }
+
+    const { email, password, name } = body
+
+    if (typeof email !== "string" || !email.trim() || email.length > 254 || !EMAIL_REGEX.test(email.trim())) {
+        return { isValid: false, error: "Invalid email format" }
+    }
+
+    if (typeof password !== "string" || password.length < 6 || password.length > 128) {
+        return { isValid: false, error: "Password must be between 6 and 128 characters long" }
+    }
+
+    if (typeof name !== "string" || !name.trim() || name.trim().length > 100) {
+        return { isValid: false, error: "Name is required and must not exceed 100 characters" }
+    }
+
+    return {
+        isValid: true,
+        normalizedEmail: email.trim().toLowerCase(),
+        name: name.trim()
+    }
+}
+
+/**
+ * Validates login input types.
+ * Rejects non-strings, objects (NoSQL injection payloads), and missing values.
+ * @param {any} body
+ * @returns {{ isValid: boolean, error?: string, normalizedEmail?: string }}
+ */
+function validateLoginInput(body) {
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+        return { isValid: false, error: "Request body must be a JSON object" }
+    }
+
+    const { email, password } = body
+
+    if (typeof email !== "string" || !email.trim() || typeof password !== "string" || !password) {
+        return { isValid: false, error: "Email and password are required and must be valid strings" }
+    }
+
+    return {
+        isValid: true,
+        normalizedEmail: email.trim().toLowerCase()
+    }
+}
+
+/**
+ * User register controller
+ * POST /api/auth/register
+ */
 async function userRegisterController(req, res) {
-    const { email, password, name } = req.body
+    const validation = validateRegistrationInput(req.body)
+    if (!validation.isValid) {
+        return res.status(400).json({
+            message: validation.error
+        })
+    }
+
+    const { normalizedEmail, name } = validation
+    const { password } = req.body
 
     const isExists = await userModel.findOne({
-        email: email
+        email: normalizedEmail
     })
 
     if (isExists) {
@@ -22,12 +93,14 @@ async function userRegisterController(req, res) {
     }
 
     const user = await userModel.create({
-        email, password, name
+        email: normalizedEmail,
+        password,
+        name
     })
 
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: "3d" })
 
-    res.cookie("token", token)
+    res.cookie("token", token, COOKIE_OPTIONS)
 
     res.status(201).json({
         user: {
@@ -38,18 +111,25 @@ async function userRegisterController(req, res) {
         token
     })
 
-    await emailService.sendRegistrationEmail(user.email, user.name)
+    emailService.sendRegistrationEmail(user.email, user.name).catch(() => {})
 }
 
 /**
- * - User Login Controller
- * - POST /api/auth/login
-  */
-
+ * User Login Controller
+ * POST /api/auth/login
+ */
 async function userLoginController(req, res) {
-    const { email, password } = req.body
+    const validation = validateLoginInput(req.body)
+    if (!validation.isValid) {
+        return res.status(400).json({
+            message: validation.error
+        })
+    }
 
-    const user = await userModel.findOne({ email }).select("+password")
+    const { normalizedEmail } = validation
+    const { password } = req.body
+
+    const user = await userModel.findOne({ email: normalizedEmail }).select("+password")
 
     if (!user) {
         return res.status(401).json({
@@ -67,7 +147,7 @@ async function userLoginController(req, res) {
 
     const token = jwt.sign({ userId: user._id }, process.env.JWT_SECRET, { expiresIn: "3d" })
 
-    res.cookie("token", token)
+    res.cookie("token", token, COOKIE_OPTIONS)
 
     res.status(200).json({
         user: {
@@ -77,14 +157,12 @@ async function userLoginController(req, res) {
         },
         token
     })
-
 }
 
-
 /**
- * - User Logout Controller
- * - POST /api/auth/logout
-  */
+ * User Logout Controller
+ * POST /api/auth/logout
+ */
 async function userLogoutController(req, res) {
     const token = req.cookies.token || req.headers.authorization?.split(" ")[ 1 ]
 
@@ -94,20 +172,20 @@ async function userLogoutController(req, res) {
         })
     }
 
-
-
     await tokenBlackListModel.create({
         token: token
     })
 
-    res.clearCookie("token")
+    res.clearCookie("token", {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === "production",
+        sameSite: "lax"
+    })
 
     res.status(200).json({
         message: "User logged out successfully"
     })
-
 }
-
 
 module.exports = {
     userRegisterController,
