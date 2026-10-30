@@ -1,18 +1,10 @@
 /**
- * Email notification service — Stage 3C minimal improvement
+ * Email notification service
  *
- * Key change from the original:
- *   transporter.verify() was called immediately on module load, which fired a
- *   live SMTP connection attempt every time tests required this file (even when
- *   mocked) and printed noise to the console.  It is now deferred to
- *   verifyEmailConnection(), called only from the production server entry point.
- *
- * Financial safety note:
- *   Email delivery is best-effort and intentionally decoupled from financial
- *   operations.  A committed transaction is complete regardless of whether the
- *   notification email is delivered.  Controllers call email functions with
- *   .catch(() => {}) so a failed notification never rolls back a transaction or
- *   changes the HTTP response code returned to the client.
+ * sendEmail() propagates errors so the BullMQ processor can trigger retries.
+ * The transporter is created at module load time; verifyEmailConnection() is
+ * called once at server startup and logs a warning if SMTP is unreachable,
+ * but does not abort startup — email delivery is optional.
  */
 
 const nodemailer = require("nodemailer")
@@ -46,22 +38,18 @@ async function verifyEmailConnection() {
 }
 
 /**
- * Internal send helper.  All errors are caught and logged; they must never
- * propagate to callers that have already committed a financial transaction.
+ * Sends an email via nodemailer. Throws on failure so BullMQ can retry.
+ * Do not call this directly from request handlers — use the outbox.
  */
 async function sendEmail(to, subject, text, html) {
-    try {
-        const info = await transporter.sendMail({
-            from: `"Backend Ledger" <${process.env.EMAIL_USER}>`,
-            to,
-            subject,
-            text,
-            html
-        })
-        logger.info("[email] Message sent", { messageId: info.messageId })
-    } catch (err) {
-        logger.error("[email] Failed to send email", { error: err.message })
-    }
+    const info = await transporter.sendMail({
+        from: `"Backend Ledger" <${process.env.EMAIL_USER}>`,
+        to,
+        subject,
+        text,
+        html
+    })
+    logger.info("[email] Message sent", { messageId: info.messageId })
 }
 
 async function sendRegistrationEmail(userEmail, name) {

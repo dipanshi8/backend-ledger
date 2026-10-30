@@ -2,7 +2,7 @@ const transactionModel = require("../models/transaction.model")
 const ledgerModel = require("../models/ledger.model")
 const accountModel = require("../models/account.model")
 const accountAccess = require("../services/account-access.service")
-const emailService = require("../services/email.service")
+const notificationOutboxModel = require("../models/notification-outbox.model")
 const { validateRupeeAmount, paiseToRupees, SUPPORTED_CURRENCIES } = require("../utils/money")
 const mongoose = require("mongoose")
 
@@ -213,6 +213,21 @@ async function createTransaction(req, res) {
                 { session, returnDocument: 'after' }
             )
 
+            // Create notification outbox event INSIDE the same session.
+            // If the transaction commits, the outbox event is durably stored.
+            // If it rolls back, the event disappears — no orphan notifications.
+            await notificationOutboxModel.create([ {
+                entityId: transactionDoc._id,
+                entityType: "transaction",
+                type: "transaction",
+                to: req.user.email,
+                name: req.user.name,
+                context: {
+                    amount: amountValidation.rupees,
+                    toAccount: toAccount
+                }
+            } ], { session })
+
             await session.commitTransaction()
             committedTransaction = completed
             break
@@ -275,13 +290,9 @@ async function createTransaction(req, res) {
         })
     }
 
-    // Asynchronously send email notification without blocking API response
-    emailService.sendTransactionEmail(
-        req.user.email,
-        req.user.name,
-        amountValidation.rupees,
-        toAccount
-    ).catch(() => {})
+    // The notification outbox event committed atomically above will be picked
+    // up by the outbox dispatcher (API server process) and enqueued to BullMQ.
+    // Email delivery is asynchronous and does not affect this response.
 
     return res.status(201).json({
         message: "Transaction completed successfully",

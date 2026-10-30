@@ -15,6 +15,14 @@ const REQUIRED_VARS = [
     "JWT_SECRET"
 ]
 
+// REDIS_URL is required in production/development but optional in test mode.
+// In test mode, rate limiters skip enforcement and the outbox dispatcher is
+// not started, so Redis is not needed.
+const REQUIRED_VARS_NON_TEST = [
+    ...REQUIRED_VARS,
+    "REDIS_URL"
+]
+
 const VALID_NODE_ENVS = ["development", "production", "test"]
 
 /**
@@ -23,7 +31,10 @@ const VALID_NODE_ENVS = ["development", "production", "test"]
  * Must be called before any module that uses process.env at runtime.
  */
 function validateEnv() {
-    const missing = REQUIRED_VARS.filter(key => !process.env[key] || !process.env[key].trim())
+    const isTest = process.env.NODE_ENV === "test"
+    const vars = isTest ? REQUIRED_VARS : REQUIRED_VARS_NON_TEST
+
+    const missing = vars.filter(key => !process.env[key] || !process.env[key].trim())
 
     if (missing.length > 0) {
         throw new Error(

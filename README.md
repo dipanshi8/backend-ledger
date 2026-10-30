@@ -1,347 +1,217 @@
 # Backend Ledger
 
-A financial transaction API built with Node.js and Express. It models users, accounts, and fund transfers using double-entry bookkeeping, with MongoDB transactions for atomicity and a ledger-derived balance model.
+A backend financial transaction API built with Node.js and Express. Models users, accounts, and fund transfers using double-entry bookkeeping with MongoDB transactions, ledger-derived balances, Redis-backed rate limiting, and asynchronous email notifications via BullMQ.
 
-**Tech stack:** Node.js · Express · MongoDB / Mongoose · JWT · bcryptjs · Nodemailer
+## Tech stack
 
----
+- **Runtime:** Node.js 20+, Express 5, CommonJS
+- **Database:** MongoDB (Mongoose) — replica set required for multi-document transactions
+- **Auth:** JWT (jsonwebtoken), bcryptjs, cookie-parser
+- **Redis:** ioredis, rate-limit-redis, BullMQ
+- **Security:** Helmet, CORS, express-rate-limit
+- **Email:** Nodemailer (Gmail OAuth2) with transactional outbox pattern
+- **Testing:** Node.js built-in test runner, mongodb-memory-server, supertest
+
+## Key features
+
+- **Double-entry ledger:** every transfer creates immutable DEBIT and CREDIT entries
+- **Integer paise storage:** amounts stored as integer minor units to avoid floating-point errors
+- **Ledger-derived balances:** no stored balance field — computed from ledger entry aggregation
+- **MongoDB transactions:** transaction, ledger entries, and notification outbox event commit atomically
+- **Idempotency keys:** client-supplied keys prevent duplicate transfers under retries
+- **Concurrency protection:** document versioning with write-conflict retries (up to 3)
+- **Account ownership:** JWT-derived ownership enforced on all account and transaction reads
+- **Redis-backed rate limiting:** shared counters across instances with fail-closed 503 on Redis failure
+- **Transactional outbox + BullMQ:** notification events committed with the financial transaction, dispatched asynchronously, processed by a separate worker
+- **Graceful shutdown:** orderly resource cleanup on SIGINT/SIGTERM for both API server and worker
 
 ## Architecture
 
 ```
-server.js              Entry point: env validation → DB connect → HTTP server → graceful shutdown
+server.js                       API server: HTTP, MongoDB, Redis, outbox dispatcher
+worker.js                       Standalone BullMQ email worker (no HTTP, no dispatcher)
 src/
-  app.js               Express app, middleware stack, health endpoints
+  app.js                        Express app, middleware stack, health endpoints
   config/
-    env.js             Startup environment variable validation
-    db.js              MongoDB connection lifecycle and readiness state
-    logger.js          Lightweight structured JSON logger (no extra dependencies)
-  controllers/         Route handlers (auth, account, transaction)
+    env.js                      Startup environment validation
+    db.js                       MongoDB connection lifecycle, readiness state
+    redis.js                    Redis singleton client with auto-reconnect
+    logger.js                   Structured NDJSON logger (no external dependency)
+  controllers/                  Route handlers (auth, account, transaction)
   middleware/
-    auth.middleware.js     JWT verification, blacklist check
-    error.middleware.js    Centralized sanitized error responses
-    rate-limit.middleware.js  express-rate-limit configuration
-  models/              Mongoose schemas (user, account, transaction, ledger, blacklist)
-  routes/              Express routers
+    auth.middleware.js          JWT verification, token blacklist
+    error.middleware.js         Centralized sanitized error responses
+    rate-limit.middleware.js    Redis-backed limiters, fail-closed policy
+  models/                       Mongoose schemas (user, account, transaction, ledger,
+                                blacklist, notification-outbox)
+  queues/
+    email.queue.js              BullMQ queue definition and job producer
+    email.processor.js          BullMQ worker processor (worker.js only)
+  routes/                       Express routers
   services/
-    account-access.service.js  Ownership and visibility checks
-    email.service.js            Best-effort email notifications
+    account-access.service.js   Ownership and visibility checks
+    email.service.js             Nodemailer send functions
+    outbox-dispatcher.service.js  Polls outbox, submits jobs to BullMQ
   utils/
-    money.js           Rupee/paise conversion and monetary validation
-test/                  Node.js built-in test runner suites
-scripts/               One-off data migration scripts (do not run against production without review)
+    money.js                    Rupee/paise validation and conversion
+test/                           6 test suites, 139 tests
+scripts/                        One-off migration script (review before use)
 ```
 
----
+| Process | Command | Role |
+|---|---|---|
+| API server | `npm run dev` | HTTP requests, outbox dispatcher, MongoDB + Redis |
+| Worker | `npm run worker:dev` | BullMQ email jobs only — no HTTP, no dispatcher |
 
-## Prerequisites
+The outbox dispatcher runs **only** in the API server to avoid duplicate dispatch.
 
-- Node.js 20 or later
-- A MongoDB **replica set** (required for multi-document transactions)
-  - Local: [run a single-node replica set](https://www.mongodb.com/docs/manual/tutorial/deploy-replica-set/) or use Docker
-  - Cloud: MongoDB Atlas free tier works out of the box
+## Setup
 
----
-
-## Local setup
+**Prerequisites:** Node.js 20+, MongoDB replica set, Redis.
 
 ```bash
 git clone https://github.com/dipanshi8/backend-ledger.git
 cd backend-ledger
 npm install
-cp .env.example .env   # then edit .env with your values
-npm run dev            # nodemon, auto-restarts on file changes
+cp .env.example .env   # fill in values
+npm run dev            # terminal 1 — API server (nodemon)
+npm run worker:dev     # terminal 2 — email worker (nodemon)
 ```
 
-The server starts on `http://localhost:3000` (or `PORT` from `.env`).
+Server starts on `http://localhost:3000` (or `PORT` from `.env`).
 
----
-
-## Environment variables
-
-Copy `.env.example` to `.env` and set each value. Never commit `.env`.
+### Environment variables
 
 | Variable | Required | Description |
 |---|---|---|
-| `MONGO_URI` | Yes | MongoDB connection string — must start with `mongodb://` or `mongodb+srv://`. Requires a replica set for transactions. |
-| `JWT_SECRET` | Yes | Secret for signing JWT tokens. Use a long random string (`openssl rand -hex 64`). |
+| `MONGO_URI` | Always | MongoDB connection string (`mongodb://` or `mongodb+srv://`). Must be a replica set. |
+| `JWT_SECRET` | Always | Secret for signing JWTs (`openssl rand -hex 64`). |
+| `REDIS_URL` | Outside test mode | Redis connection string, e.g. `redis://localhost:6379`. Required for rate limiting and BullMQ. |
 | `PORT` | No | HTTP port. Defaults to `3000`. |
-| `NODE_ENV` | No | `development` \| `production` \| `test`. Affects cookie security and log verbosity. |
-| `ALLOWED_ORIGINS` | No | Comma-separated browser origins for CORS, e.g. `http://localhost:3001`. If empty: test mode allows all, other modes deny all cross-origin requests. |
-| `EMAIL_USER` | No | Gmail address for OAuth2 email notifications. |
+| `NODE_ENV` | No | `development` \| `production` \| `test`. |
+| `ALLOWED_ORIGINS` | No | Comma-separated CORS origins, e.g. `http://localhost:3001`. |
+| `EMAIL_USER` | No | Gmail address for OAuth2 email. |
 | `CLIENT_ID` | No | Google OAuth2 client ID. |
 | `CLIENT_SECRET` | No | Google OAuth2 client secret. |
 | `REFRESH_TOKEN` | No | Google OAuth2 refresh token. |
-| `SHUTDOWN_TIMEOUT_MS` | No | Graceful shutdown timeout in ms. Defaults to `10000`. |
+| `SHUTDOWN_TIMEOUT_MS` | No | Graceful shutdown timeout (ms). Defaults to `10000`. |
+| `OUTBOX_POLL_INTERVAL_MS` | No | Outbox dispatcher poll interval (ms). Defaults to `10000`. |
 
-Startup fails immediately with a clear message if `MONGO_URI` or `JWT_SECRET` is absent or malformed.
+Startup fails immediately if `MONGO_URI` or `JWT_SECRET` is missing. Outside test mode, `REDIS_URL` is also required.
 
----
+## API endpoints
 
-## Running the server
+Protected endpoints require a JWT via cookie (`token`) or `Authorization: Bearer <token>`. JWTs expire after 3 days; logout blacklists the token in a TTL-indexed collection. Cookies use `HttpOnly`, `SameSite=Lax`, `Secure` (production).
 
-```bash
-npm start        # production (node server.js)
-npm run dev      # development (nodemon server.js)
-```
+### Auth — rate-limited (10 req / 15 min / IP)
 
-Startup sequence:
-1. Validate environment variables
-2. Connect to MongoDB (exits if this fails)
-3. Verify SMTP connection (best-effort, does not block startup)
-4. Start HTTP server
+| Method | Path | Description | Responses |
+|---|---|---|---|
+| `POST` | `/api/auth/register` | Register user. Body: `{ email, password, name }` | `201` · `400` · `422` (taken) · `429` · `503` |
+| `POST` | `/api/auth/login` | Authenticate. Body: `{ email, password }` | `200` · `400` · `401` · `429` · `503` |
+| `POST` | `/api/auth/logout` | Blacklist current token | `200` |
 
----
+NoSQL operator payloads (`{ "$gt": "" }`) are rejected on all auth inputs.
 
-## Running tests
+### Accounts — authentication required
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/api/accounts` | Create account (ownership from JWT, body `user` ignored) |
+| `GET` | `/api/accounts` | List caller's accounts |
+| `GET` | `/api/accounts/balance/:id` | Balance in rupees (`404` if not owned) |
+| `GET` | `/api/accounts/:id/ledger` | Ledger entries in chronological order (`404` if not owned) |
+
+Accounts start `ACTIVE` with currency `INR`. `FROZEN` and `CLOSED` accounts cannot send or receive transfers.
+
+### Transactions — rate-limited (30 req / min / IP)
+
+| Method | Path | Description | Responses |
+|---|---|---|---|
+| `POST` | `/api/transactions` | Transfer funds. Body: `{ fromAccount, toAccount, amount, idempotencyKey }` | `201` · `200` (replay) · `400` · `409` (conflict) · `503` |
+| `GET` | `/api/transactions/:id` | Fetch transaction (`404` if not a party) | `200` · `404` |
+| `POST` | `/api/transactions/system/initial-funds` | System-user funding (`403` for regular users) | `201` · `200` · `400` |
+
+Transfer validation: `amount` must be a finite number in rupees, positive, max ₹10,000,000, at most 2 decimal places. Self-transfers, inactive accounts, and cross-currency transfers are rejected.
+
+**Idempotency:** every transfer requires a client-supplied `idempotencyKey`. Same key + same payload returns the original transaction (`200`). Same key + different payload returns `400`. Keys used by other users return `400` without revealing the other transaction.
+
+### Health — public, unauthenticated
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/health/live` | Liveness — `200 { "status": "ok" }` |
+| `GET` | `/health/ready` | Readiness — `200` when MongoDB connected (includes `redis` status); `503` if MongoDB down |
+| `GET` | `/` | Legacy liveness — plain text |
+
+Redis disconnection does not cause a 503 on `/health/ready` — the response includes a `redis` field showing current state.
+
+## Engineering decisions
+
+### Financial integrity
+
+- **Integer paise:** all amounts stored as integer minor units (1 rupee = 100 paise). API accepts rupees; conversion is lossless for ≤2 decimal places. This avoids floating-point arithmetic errors.
+- **Double-entry ledger:** each transfer creates immutable DEBIT and CREDIT entries for the same amount. Schema pre-hooks prevent modification or deletion.
+- **Ledger-derived balances:** computed by aggregating ledger entries (credits − debits). No stored balance field.
+- **Atomicity:** transaction document, debit, credit, and notification outbox event all commit or roll back together in a MongoDB session.
+- **Concurrency:** sender account is version-incremented within the session for write-lock serialization. Transient conflicts retry up to 3 times with back-off.
+
+### Rate limiting
+
+| Endpoint group | Limit | Window |
+|---|---|---|
+| Auth (register, login) | 10 requests | 15 minutes per IP |
+| Financial writes (transactions, initial-funds) | 30 requests | 1 minute per IP |
+
+Counters are stored in Redis and shared across all instances using the same Redis service. Exceeded limits return `429 { "message": "Too many requests, please try again later" }`.
+
+**Fail-closed policy:** if Redis is unavailable, rate-limited endpoints return `503` instead of falling back to in-memory counters. The API server can start without Redis — rate-limited endpoints stay unavailable until Redis reconnects, then recover automatically without restart. Health endpoints are not rate-limited.
+
+### Asynchronous email notifications
+
+Email delivery is decoupled from the financial API via a transactional outbox:
+
+1. **Atomic write:** when a transfer commits, a notification outbox event is written in the same MongoDB session. Rollbacks leave no orphan event.
+2. **Dispatcher:** runs in the API server, polls for `PENDING` outbox events, atomically claims each (`PENDING → DISPATCHING`), submits a BullMQ job with a deterministic ID (`email:<outboxEventId>`), then marks it `DISPATCHED`.
+3. **Worker:** the separate `worker.js` process consumes BullMQ jobs and sends emails via Nodemailer. Failed jobs retry **3 times** with exponential back-off (2s, 4s, 8s).
+
+**Crash recovery:**
+- Stale `DISPATCHING` claims older than 60 seconds revert to `PENDING` on restart.
+- Deterministic job IDs prevent duplicate BullMQ jobs if the dispatcher re-submits after a crash.
+- After 5 failed dispatch attempts, the event is marked `FAILED` and retained for manual review (not deleted).
+
+BullMQ provides **at-least-once** processing — duplicate emails are possible in rare recovery scenarios. Exactly-once delivery is not claimed.
+
+Registration emails use the same outbox approach but are created outside a MongoDB transaction (best-effort — a failed outbox write does not block registration).
+
+### Security and operations
+
+- **Helmet:** security headers on all responses (CSP, HSTS, X-Content-Type-Options, X-Frame-Options). `X-Powered-By` removed.
+- **NoSQL injection:** auth inputs validated as plain strings before reaching MongoDB queries.
+- **Error sanitization:** stack traces, file paths, and database internals never exposed to clients.
+- **Request body limit:** 100 kB. Oversized requests return `413`.
+- **CORS:** wildcard origins never combined with `credentials: true`. No-`Origin` requests always allowed. Empty `ALLOWED_ORIGINS` denies all cross-origin requests (except test mode).
+- **Logging:** structured NDJSON to stdout/stderr. Auth headers, cookies, and passwords never logged. Test mode emits only errors.
+- **Graceful shutdown:** on SIGINT/SIGTERM — stop dispatcher → close HTTP → close queue → close Redis → close MongoDB → exit 0. Worker follows the same pattern for its BullMQ worker and Redis.
+
+## Testing
 
 ```bash
 npm test
 ```
 
-Tests use `mongodb-memory-server` (in-memory replica set) — no external database needed. All 90 tests run in a single Node.js process.
+**139 tests** across 6 files. Uses `mongodb-memory-server` (in-memory replica set) and mocked Redis/BullMQ — no external services required.
 
----
+Coverage: account ownership and authorization, financial integrity (double-entry balancing, atomicity, concurrency), monetary validation, idempotency, NoSQL injection protection, error sanitization, Helmet headers, CORS, rate limiting, request body limits, environment validation, health endpoints, logger behavior, Redis connection recovery, outbox atomicity, dispatcher claims and stale-claim recovery, duplicate dispatch safety, email queue and processor, worker lifecycle, and financial integrity regressions.
 
-## Authentication
+## Limitations
 
-All protected endpoints require a JWT. The token can be passed in two ways:
-
-- **Cookie:** `token` cookie (set automatically on login/register)
-- **Header:** `Authorization: Bearer <token>`
-
-JWTs expire after **3 days**. Logging out blacklists the token in the database (TTL-indexed, auto-expires after 3 days).
-
-Cookie attributes: `HttpOnly`, `SameSite=Lax`, `Secure` (only in production).
-
----
-
-## API endpoints
-
-### Auth — public, rate-limited (10 requests / 15 minutes per IP)
-
-#### `POST /api/auth/register`
-Register a new user.
-
-Request body:
-```json
-{ "email": "user@example.com", "password": "password123", "name": "Alice" }
-```
-
-- `email`: valid email format, max 254 characters
-- `password`: string, 6–128 characters
-- `name`: string, 1–100 characters, non-blank
-
-Responses: `201 Created` · `400 Bad Request` (validation) · `422 Unprocessable Entity` (email already taken) · `429 Too Many Requests`
-
-#### `POST /api/auth/login`
-Authenticate and receive a JWT.
-
-Request body:
-```json
-{ "email": "user@example.com", "password": "password123" }
-```
-
-Responses: `200 OK` · `400 Bad Request` (missing/invalid fields) · `401 Unauthorized` (wrong credentials) · `429 Too Many Requests`
-
-Both endpoints reject NoSQL operator objects (`{ "$gt": "" }`) in place of string values.
-
-#### `POST /api/auth/logout`
-Blacklists the current token. Returns `200` whether or not a token was present.
-
----
-
-### Accounts — authentication required
-
-#### `POST /api/accounts`
-Create a new account for the authenticated user. Account ownership is derived from the JWT — any `user` field in the body is ignored.
-
-Response: `201 Created` with the new account object. Accounts start in `ACTIVE` status with currency `INR`.
-
-#### `GET /api/accounts`
-List all accounts owned by the authenticated user.
-
-#### `GET /api/accounts/balance/:accountId`
-Returns the current balance in rupees for an account the caller owns. Returns `404` for accounts that do not exist or belong to another user — both cases return identical responses.
-
-#### `GET /api/accounts/:accountId/ledger`
-Returns all ledger entries for an account the caller owns, in chronological order. Returns `404` as above.
-
-**Account status** affects transfers:
-
-| Status | Can send | Can receive |
-|---|---|---|
-| `ACTIVE` | Yes | Yes |
-| `FROZEN` | No | No |
-| `CLOSED` | No | No |
-
----
-
-### Transactions — authentication required, rate-limited (30 writes / minute per IP)
-
-#### `POST /api/transactions`
-Transfer funds between two accounts.
-
-Request body:
-```json
-{
-  "fromAccount": "<accountId>",
-  "toAccount":   "<accountId>",
-  "amount":      100.50,
-  "idempotencyKey": "unique-client-key"
-}
-```
-
-- `amount`: finite number in rupees, positive, max ₹10,000,000, at most 2 decimal places (no strings, booleans, or objects)
-- `fromAccount` must be owned by the authenticated user
-- `toAccount` must exist and be reachable (any user's account)
-- Self-transfers are rejected
-- Both accounts must be `ACTIVE`
-- Both accounts must have the same currency (only `INR` is supported)
-
-Responses: `201 Created` · `200 OK` (idempotent replay) · `400 Bad Request` · `409 Conflict` (unresolvable concurrency)
-
-#### `GET /api/transactions/:transactionId`
-Fetch a transaction. Returns `404` unless the caller owns the sender or receiver account. Missing and unauthorized transactions return identical responses.
-
-#### `POST /api/transactions/system/initial-funds`
-Fund an account from the system user. Requires a token issued to a user with `systemUser: true`. Not available to regular users (returns `403`).
-
-Request body:
-```json
-{
-  "toAccount": "<accountId>",
-  "amount": 100,
-  "idempotencyKey": "unique-key"
-}
-```
-
----
-
-### Health — public, unauthenticated
-
-#### `GET /health/live`
-Liveness probe. Returns `200 { "status": "ok" }` as long as the process is running.
-
-#### `GET /health/ready`
-Readiness probe. Returns `200 { "status": "ready" }` when MongoDB is connected. Returns `503 { "status": "unavailable", "reason": "database not connected" }` during startup or after a disconnection. Does not expose connection strings or credentials.
-
-#### `GET /`
-Legacy liveness check — returns the plain text string `"Ledger Service is up and running"`.
-
----
-
-## Financial model
-
-### Amounts
-- All amounts are stored internally as **integer paise** (1 rupee = 100 paise).
-- API inputs and outputs use **rupees** as a decimal number.
-- The conversion is lossless for values with at most 2 decimal places.
-
-### Double-entry bookkeeping
-Every transfer creates two immutable ledger entries: a DEBIT on the sender's account and a CREDIT on the receiver's account, both for the same amount. Entries can never be modified or deleted.
-
-### Ledger-derived balances
-Account balances are computed by aggregating all ledger entries (sum of credits minus sum of debits). There is no stored balance field.
-
-### Atomicity
-Each transfer runs inside a MongoDB multi-document session. The transaction document, debit entry, and credit entry are all committed together or all rolled back.
-
-### Concurrency protection
-The sender's account document is updated (`version` increment) within the session to obtain a write lock and detect conflicting concurrent transfers. Transient write conflicts are retried up to 3 times with a short back-off.
-
----
-
-## Idempotency
-
-Every write to `POST /api/transactions` requires a unique `idempotencyKey` supplied by the client.
-
-| Scenario | Response |
-|---|---|
-| Same key, same payload, transaction completed | `200` with the original transaction |
-| Same key, same payload, transaction still pending | `200` with a pending notice |
-| Same key, different amount or recipient | `400` |
-| Key used by a different user's transaction | `400` (no information about the other transaction is revealed) |
-
----
-
-## Rate limiting
-
-| Endpoint group | Limit | Window |
-|---|---|---|
-| `POST /api/auth/register`, `POST /api/auth/login` | 10 requests | 15 minutes per IP |
-| `POST /api/transactions`, `POST /api/transactions/system/initial-funds` | 30 requests | 1 minute per IP |
-
-Exceeded limits return `429 Too Many Requests` with a JSON body: `{ "message": "Too many requests, please try again later" }`.
-
-**Known limitation:** Rate-limit counters are stored in process memory and are not shared across multiple application instances. In a multi-process or load-balanced deployment, each instance applies its own limits independently. A shared store (e.g. Redis) is required for cluster-accurate rate limiting.
-
----
-
-## CORS
-
-Set `ALLOWED_ORIGINS` to a comma-separated list of allowed browser origins:
-
-```
-ALLOWED_ORIGINS=http://localhost:3001,https://app.example.com
-```
-
-- Wildcard (`*`) origins are never used in combination with `credentials: true`.
-- Requests without an `Origin` header (curl, server-to-server) are always allowed.
-- In `NODE_ENV=test` with no configured origins, all origins are permitted to support automated tests.
-- In all other environments with no configured origins, all cross-origin browser requests are denied.
-
----
-
-## Security
-
-- **Helmet** sets standard security headers on all responses: CSP, HSTS, X-Content-Type-Options, X-Frame-Options, and others. `X-Powered-By` is removed.
-- **JWT tokens** are signed with `JWT_SECRET`. Invalidated tokens are stored in a TTL-indexed blacklist.
-- **Password hashing** uses bcryptjs (10 rounds).
-- **NoSQL injection protection:** all auth inputs are validated as plain strings before reaching the database query layer.
-- **Error sanitization:** stack traces, file paths, and database internals are never returned to clients. All error responses are JSON.
-
----
-
-## Email notifications
-
-Registration and successful transfers trigger best-effort email notifications via Gmail OAuth2. A failed email does not affect the API response or the committed financial transaction. SMTP configuration is optional — the server starts normally without it.
-
----
-
-## Logging
-
-Structured JSON logs are written to stdout (all levels) and stderr (errors). In `NODE_ENV=test` only error-level entries are emitted to keep test output clean.
-
-Authorization headers, cookies, and passwords are never logged.
-
-Sample log entry:
-```json
-{"level":"http","ts":"2026-10-29T10:00:00.000Z","msg":"request","method":"POST","url":"/api/auth/login","status":200,"ms":45,"ip":"127.0.0.1"}
-```
-
----
-
-## Graceful shutdown
-
-On `SIGINT` or `SIGTERM` the server:
-1. Stops accepting new connections
-2. Waits up to `SHUTDOWN_TIMEOUT_MS` (default 10 s) for in-flight requests to finish
-3. Closes the MongoDB connection
-4. Exits with code `0`
-
----
-
-## Known limitations and deployment prerequisites
-
-- **Replica set required:** MongoDB multi-document transactions require a replica set. A standalone MongoDB instance will not work. MongoDB Atlas free tier and a locally configured replica set both work.
-- **In-memory rate limiting:** counters reset on restart and are not shared across instances (see Rate limiting above).
-- **No token rotation:** JWTs are long-lived (3 days). Revocation requires the logout endpoint.
-- **Email delivery:** best-effort only, no retry queue. Failed notifications are logged but not retried.
-- **Single currency:** only `INR` is supported. Cross-currency transfers are rejected.
-- **No pagination:** `GET /api/accounts` and `GET /api/accounts/:id/ledger` return all records for the authenticated user without pagination.
-
----
+- **Single currency:** only `INR`. Cross-currency transfers rejected.
+- **No token rotation:** JWTs expire after 3 days. Revocation requires the logout endpoint.
+- **No pagination:** account and ledger endpoints return all records.
+- **At-least-once email delivery:** duplicate emails possible in failure/recovery scenarios.
+- **Single-instance dispatcher:** multi-instance deployments need an external lock to prevent duplicate dispatch.
+- **Replica set required:** MongoDB standalone does not support multi-document transactions.
 
 ## Author
 

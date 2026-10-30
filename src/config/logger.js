@@ -75,17 +75,6 @@ function requestLogger() {
     return (req, res, next) => {
         const start = Date.now()
 
-        // Redact sensitive headers before logging
-        const safeHeaders = {}
-        for (const [k, v] of Object.entries(req.headers)) {
-            const lower = k.toLowerCase()
-            if (lower === "authorization" || lower === "cookie" || lower === "set-cookie") {
-                safeHeaders[k] = "[redacted]"
-            } else {
-                safeHeaders[k] = v
-            }
-        }
-
         res.on("finish", () => {
             logger.http("request", {
                 method: req.method,

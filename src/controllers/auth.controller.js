@@ -1,6 +1,6 @@
 const userModel = require("../models/user.model")
 const jwt = require("jsonwebtoken")
-const emailService = require("../services/email.service")
+const notificationOutboxModel = require("../models/notification-outbox.model")
 const tokenBlackListModel = require("../models/blackList.model")
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -111,7 +111,18 @@ async function userRegisterController(req, res) {
         token
     })
 
-    emailService.sendRegistrationEmail(user.email, user.name).catch(() => {})
+    // Create notification outbox event for the welcome email.
+    // Registration is not inside a MongoDB transaction, so this is best-effort
+    // (same risk profile as the previous fire-and-forget approach).
+    // The outbox dispatcher will pick this up and enqueue to BullMQ.
+    notificationOutboxModel.create({
+        entityId: user._id,
+        entityType: "user",
+        type: "registration",
+        to: user.email,
+        name: user.name,
+        context: {}
+    }).catch(() => {})
 }
 
 /**

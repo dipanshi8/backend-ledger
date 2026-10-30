@@ -1,49 +1,27 @@
 /**
- * Express application — Stage 3B/3C
- *
- * Middleware order (must not be changed without understanding dependencies):
- *   1. helmet          — security headers on every response
- *   2. cors            — CORS preflight + credentialed-origin enforcement
- *   3. requestLogger   — structured HTTP access log (redacts sensitive headers)
- *   4. express.json    — body parsing with explicit size cap
- *   5. cookieParser    — cookie access for auth middleware
- *   6. rate limiters   — mounted on individual routers (see routes)
- *   7. routes          — API routes
+ * Express application — middleware order:
+ *   1. helmet       — security headers
+ *   2. cors         — CORS with credentialed-origin enforcement
+ *   3. requestLogger — structured access log (redacts auth headers)
+ *   4. express.json — body parsing, 100 kB limit
+ *   5. cookieParser
+ *   6. rate limiters — mounted on individual routers (see routes/)
+ *   7. routes
  *   8. 404 fallback
  *   9. centralized error handler
  *
- * ─────────────────────────────────────────────────────────────────────────────
- * CORS CONFIGURATION
- * ─────────────────────────────────────────────────────────────────────────────
- * Set ALLOWED_ORIGINS as a comma-separated list of full origins in your
- * environment.  An "origin" is scheme + host + port, e.g.:
+ * CORS: set ALLOWED_ORIGINS to a comma-separated list of allowed browser
+ * origins (e.g. http://localhost:3001). In test mode with no configured
+ * origins, all origins are permitted. In other modes, an empty list denies
+ * all cross-origin requests. Wildcard + credentials is never used.
  *
- *   Local development:
- *     ALLOWED_ORIGINS=http://localhost:3001
+ * Rate limiting: uses Redis-backed store when Redis is connected.
+ * Falls back to fail-closed 503 when Redis is unavailable (production).
+ * See src/middleware/rate-limit.middleware.js for policy details.
  *
- *   Multiple origins:
- *     ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
- *
- * If ALLOWED_ORIGINS is absent or empty:
- *   - In NODE_ENV=test  — all origins are allowed (integration-test convenience)
- *   - In all other envs — no origin is permitted (safe closed default)
- *
- * Wildcard origins ('*') are never combined with credentials=true to comply
- * with the CORS specification and browser security requirements.
- *
- * ─────────────────────────────────────────────────────────────────────────────
- * RATE LIMITING
- * ─────────────────────────────────────────────────────────────────────────────
- * In-memory counters — NOT shared across multiple application instances.
- * See src/middleware/rate-limit.middleware.js for limits and notes on
- * upgrading to a shared store for multi-instance deployments.
- *
- * ─────────────────────────────────────────────────────────────────────────────
- * HEALTH ENDPOINTS
- * ─────────────────────────────────────────────────────────────────────────────
- * GET /health/live   — liveness: returns 200 if the process is running
- * GET /health/ready  — readiness: returns 200 only when MongoDB is connected;
- *                      returns 503 during startup or after a disconnect
+ * Health endpoints (unauthenticated, no rate limiting):
+ *   GET /health/live  — process is alive
+ *   GET /health/ready — MongoDB connected; includes Redis status
  */
 
 const express = require("express")
@@ -53,13 +31,11 @@ const cookieParser = require("cookie-parser")
 const { errorHandler } = require("./middleware/error.middleware")
 const { requestLogger } = require("./config/logger")
 const { readinessState } = require("./config/db")
+const { redisReady } = require("./config/redis")
 
 // ── CORS origin list ──────────────────────────────────────────────────────────
-/**
- * Parse ALLOWED_ORIGINS env var into a validated list.
- * Each entry must look like a full origin (scheme://host[:port]).
- * Entries that do not match the pattern are dropped with a warning.
- */
+// Parse ALLOWED_ORIGINS into a validated list of full origins (scheme://host[:port]).
+// Malformed entries are dropped with a warning.
 function parseAllowedOrigins() {
     const raw = process.env.ALLOWED_ORIGINS || ""
     if (!raw.trim()) return []
@@ -129,26 +105,22 @@ app.use(express.json({ limit: "100kb" }))
 app.use(cookieParser())
 
 // ── Health endpoints (unauthenticated, no rate limiting) ─────────────────────
-/**
- * GET /health/live
- * Liveness probe — returns 200 as long as the Node.js process is alive.
- * Does not check external dependencies.
- */
+
 app.get("/health/live", (req, res) => {
     res.status(200).json({ status: "ok" })
 })
 
-/**
- * GET /health/ready
- * Readiness probe — returns 200 only when the application can serve requests
- * (MongoDB is connected). Returns 503 during startup or after a disconnect.
- * Does not expose connection strings, credentials, or internal error details.
- */
 app.get("/health/ready", (req, res) => {
     if (readinessState.dbReady) {
-        return res.status(200).json({ status: "ready" })
+        return res.status(200).json({
+            status: "ready",
+            redis: redisReady.connected ? "connected" : "disconnected"
+        })
     }
-    return res.status(503).json({ status: "unavailable", reason: "database not connected" })
+    return res.status(503).json({
+        status: "unavailable",
+        reason: "database not connected"
+    })
 })
 
 // ── Legacy root liveness (kept for backwards compatibility) ───────────────────

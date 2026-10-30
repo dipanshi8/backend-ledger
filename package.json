@@ -2,11 +2,13 @@
   "name": "backend-ledger",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
-    "test": "node --test --test-timeout=180000 test/authorization.test.js test/financial-integrity.test.js test/security-sanitization.test.js test/api-security.test.js test/operational.test.js",
+    "test": "node --test --test-timeout=180000 test/authorization.test.js test/financial-integrity.test.js test/security-sanitization.test.js test/api-security.test.js test/operational.test.js test/stage4.test.js",
     "start": "node server.js",
-    "dev": "npx nodemon server.js"
+    "dev": "npx nodemon server.js",
+    "worker": "node worker.js",
+    "worker:dev": "npx nodemon worker.js"
   },
   "keywords": [],
   "author": "",
@@ -14,15 +16,18 @@
   "type": "commonjs",
   "dependencies": {
     "bcryptjs": "^3.0.3",
+    "bullmq": "^6.5.1",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "dotenv": "^18.0.8",
     "express": "^5.3.0",
     "express-rate-limit": "^8.7.1",
     "helmet": "^8.3.0",
+    "ioredis": "^5.6.1",
     "jsonwebtoken": "^9.0.3",
     "mongoose": "^9.11.3",
-    "nodemailer": "^10.2.1"
+    "nodemailer": "^10.2.1",
+    "rate-limit-redis": "^6.0.2"
   },
   "devDependencies": {
     "mongodb-memory-server": "^11.3.0",
